@@ -1,67 +1,89 @@
 <?php
 
+use App\Jobs\Analysis\AnalyzePendingStoriesJob;
+use App\Jobs\Articles\GenerateDailyBriefingJob;
+use App\Jobs\Articles\GenerateEligibleArticlesJob;
+use App\Jobs\Articles\RefreshDevelopingArticlesJob;
+use App\Jobs\Calendar\SyncEconomicCalendarJob;
+use App\Jobs\Ingestion\DispatchSourceIngestionJob;
+use App\Jobs\Maintenance\MaintainSeoJob;
+use App\Jobs\Market\CaptureMarketPricesJob;
+use App\Jobs\Monitoring\CheckPipelineHealthJob;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
-
-use App\Jobs\FetchFinancialNewsJob;
-use App\Jobs\FetchGeopoliticalNewsJob;
-use App\Jobs\FetchMarketNewsJob;
-use App\Jobs\FetchCalendarJob;
 
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-// ──────────────────────────────────────────────
-// News Ingestion Scheduler
-// ──────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+// Continuous Market-Intelligence Pipeline
+// Single cron entry required on the server:
+//   * * * * * cd /var/www/your-app && php artisan schedule:run >> /dev/null 2>&1
+// ──────────────────────────────────────────────────────────────────────────────
 
-// Financial news: every 30 minutes
-Schedule::job(new FetchFinancialNewsJob)
-    ->everyThirtyMinutes()
-    ->name('ingest:financial')
-    ->withoutOverlapping()
-    ->onOneServer();
+// News ingestion — every 10 minutes
+// Inspects all active sources and dispatches one IngestNewsSourceJob per due source.
+// Queue is set in the job constructor; onQueue() is not available on scheduled jobs.
+Schedule::job(new DispatchSourceIngestionJob())
+    ->everyTenMinutes()
+    ->withoutOverlapping(15)
+    ->onOneServer()
+    ->name('ingest:dispatch');
 
-// Geopolitical news: every hour
-Schedule::job(new FetchGeopoliticalNewsJob)
-    ->hourly()
-    ->name('ingest:geopolitical')
-    ->withoutOverlapping()
-    ->onOneServer();
+// Market price snapshots — every 15 minutes
+Schedule::job(new CaptureMarketPricesJob())
+    ->everyFifteenMinutes()
+    ->withoutOverlapping(10)
+    ->onOneServer()
+    ->name('market:capture-prices');
 
-// Market news: every 30 minutes
-Schedule::job(new FetchMarketNewsJob)
-    ->everyThirtyMinutes()
-    ->name('ingest:market')
-    ->withoutOverlapping()
-    ->onOneServer();
-
-// Economic calendar: every 6 hours
-Schedule::job(new FetchCalendarJob)
+// Economic calendar sync — every 6 hours, 14 days ahead
+Schedule::job(new SyncEconomicCalendarJob(daysAhead: 14))
     ->everySixHours()
-    ->name('ingest:economic_calendar')
-    ->withoutOverlapping()
-    ->onOneServer();
+    ->withoutOverlapping(30)
+    ->onOneServer()
+    ->name('calendar:sync');
 
-// Process economic events: classify + compute surprise every hour
-Schedule::command('events:process')
+// General analysis (impact scoring + classification) — hourly
+Schedule::job(new AnalyzePendingStoriesJob())
     ->hourly()
-    ->name('events:process')
-    ->withoutOverlapping()
-    ->onOneServer();
+    ->withoutOverlapping(45)
+    ->onOneServer()
+    ->name('analysis:pending-stories');
 
-// Process geopolitical events: classify + detect regions + dispatch AI analysis every 2 hours
-Schedule::command('events:geopolitical')
+// Article generation (eligibility-gated) — every 2 hours
+Schedule::job(new GenerateEligibleArticlesJob())
     ->everyTwoHours()
-    ->name('events:geopolitical')
-    ->withoutOverlapping()
-    ->onOneServer();
+    ->withoutOverlapping(90)
+    ->onOneServer()
+    ->name('articles:generate-eligible');
 
-// Fetch market asset prices every thirty minutes
-Schedule::command('market:fetch-prices')
+// Developing-article refresh — every 30 minutes
+Schedule::job(new RefreshDevelopingArticlesJob())
     ->everyThirtyMinutes()
-    ->name('market:fetch-prices')
-    ->withoutOverlapping()
-    ->onOneServer();
+    ->withoutOverlapping(25)
+    ->onOneServer()
+    ->name('articles:refresh-developing');
+
+// Daily market briefing — 05:30 UTC (before European open)
+Schedule::job(new GenerateDailyBriefingJob())
+    ->dailyAt('05:30')
+    ->timezone('UTC')
+    ->onOneServer()
+    ->name('articles:daily-briefing');
+
+// SEO maintenance (sitemap + indexing) — 02:00 UTC
+Schedule::job(new MaintainSeoJob())
+    ->dailyAt('02:00')
+    ->timezone('UTC')
+    ->onOneServer()
+    ->name('seo:maintain');
+
+// Pipeline health monitor — every 10 minutes
+Schedule::job(new CheckPipelineHealthJob())
+    ->everyTenMinutes()
+    ->withoutOverlapping(5)
+    ->onOneServer()
+    ->name('monitoring:health');

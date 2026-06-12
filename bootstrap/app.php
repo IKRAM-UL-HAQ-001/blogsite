@@ -4,7 +4,6 @@ use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 
-use Illuminate\Console\Scheduling\Schedule;
 use App\Http\Middleware\EnsureUserHasRole;
 
 return Application::configure(basePath: dirname(__DIR__))
@@ -13,12 +12,6 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
-    ->withSchedule(function (Schedule $schedule) {
-        $schedule->job(new \App\Jobs\CollectNewsJob)->everyFifteenMinutes();
-        $schedule->job(new \App\Jobs\AnalyzeNewsJob)->hourly();
-        $schedule->job(new \App\Jobs\GenerateArticlesJob)->everyTwoHours();
-        $schedule->job(new \App\Jobs\UpdateSitemapJob)->daily();
-    })
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'role' => EnsureUserHasRole::class,

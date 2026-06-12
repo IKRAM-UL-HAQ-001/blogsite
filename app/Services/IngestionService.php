@@ -9,6 +9,7 @@ use App\Models\EconomicIndicator;
 use App\Models\GeopoliticalEvent;
 use App\Models\GeopoliticalEventType;
 use App\Models\IngestionLog;
+use App\Models\PipelineRun;
 use App\Jobs\ProcessEconomicEventJob;
 use App\Jobs\ProcessGeopoliticalEventJob;
 use Illuminate\Support\Facades\Http;
@@ -63,6 +64,11 @@ class IngestionService
             'source_url' => $source->url,
         ])]);
 
+        $run = PipelineRun::start("ingest:{$source->type}", [
+            'source_id'   => $source->id,
+            'source_name' => $source->name,
+        ]);
+
         Log::info("Ingestion started: {$source->name} (type: {$source->type})");
 
         try {
@@ -94,10 +100,17 @@ class IngestionService
                 ($stats['errors'] ?? 0) > 0 ? ($stats['error_details'] ?? null) : null
             );
 
+            $source->markFetched();
+            $run->complete($stats['fetched'], $stats['stored'], $stats['errors'] ?? 0, [
+                'duplicates' => $stats['duplicates'],
+            ]);
+
             Log::info("Ingestion completed: {$source->name}", $stats);
 
         } catch (\Exception $e) {
             $log->fail($e->getMessage());
+            $source->markFailed($e->getMessage());
+            $run->fail($e->getMessage());
             Log::error("Ingestion failed: {$source->name} - " . $e->getMessage());
         }
 
@@ -138,8 +151,10 @@ class IngestionService
 
                 $stats['fetched']++;
 
-                // Duplicate detection: URL + content hash
-                if ($this->isDuplicate($url, $title)) {
+                $cleanBody = strip_tags($description);
+
+                // Duplicate detection: URL or content hash
+                if ($this->isDuplicate($url, $title, $cleanBody)) {
                     $stats['duplicates']++;
                     continue;
                 }
@@ -148,11 +163,14 @@ class IngestionService
 
                 RawArticle::create([
                     'news_source_id' => $source->id,
-                    'title' => $title,
-                    'url' => $url,
-                    'body' => strip_tags($description),
-                    'published_at' => $publishedAt,
-                    'status' => 'pending',
+                    'title'          => $title,
+                    'url'            => $url,
+                    'content_hash'   => $this->contentHash($title, $cleanBody),
+                    'body'           => $cleanBody,
+                    'summary'        => $cleanBody !== '' ? Str::limit($cleanBody, 500) : null,
+                    'published_at'   => $publishedAt,
+                    'fetched_at'     => now(),
+                    'status'         => 'pending',
                 ]);
 
                 $stats['stored']++;
@@ -205,8 +223,10 @@ class IngestionService
 
                 $stats['fetched']++;
 
-                // Duplicate detection: URL + content hash
-                if ($this->isDuplicate($url, $title)) {
+                $cleanBody = strip_tags($description);
+
+                // Duplicate detection: URL or content hash
+                if ($this->isDuplicate($url, $title, $cleanBody)) {
                     $stats['duplicates']++;
                     continue;
                 }
@@ -216,11 +236,14 @@ class IngestionService
                 // Create RawArticle
                 $rawArticle = RawArticle::create([
                     'news_source_id' => $source->id,
-                    'title' => $title,
-                    'url' => $url,
-                    'body' => strip_tags($description),
-                    'published_at' => $publishedAt,
-                    'status' => 'pending',
+                    'title'          => $title,
+                    'url'            => $url,
+                    'content_hash'   => $this->contentHash($title, $cleanBody),
+                    'body'           => $cleanBody,
+                    'summary'        => $cleanBody !== '' ? Str::limit($cleanBody, 500) : null,
+                    'published_at'   => $publishedAt,
+                    'fetched_at'     => now(),
+                    'status'         => 'pending',
                 ]);
 
                 $stats['stored']++;
@@ -318,18 +341,23 @@ class IngestionService
 
                     $stats['fetched']++;
 
-                    if ($this->isDuplicate($url, $title)) {
+                    $cleanBody = strip_tags($body);
+
+                    if ($this->isDuplicate($url, $title, $cleanBody)) {
                         $stats['duplicates']++;
                         continue;
                     }
 
                     RawArticle::create([
                         'news_source_id' => $source->id,
-                        'title' => $title,
-                        'url' => $url,
-                        'body' => strip_tags($body),
-                        'published_at' => $publishedAt,
-                        'status' => 'pending',
+                        'title'          => $title,
+                        'url'            => $url,
+                        'content_hash'   => $this->contentHash($title, $cleanBody),
+                        'body'           => $cleanBody,
+                        'summary'        => $cleanBody !== '' ? Str::limit($cleanBody, 500) : null,
+                        'published_at'   => $publishedAt,
+                        'fetched_at'     => now(),
+                        'status'         => 'pending',
                     ]);
 
                     $stats['stored']++;
@@ -548,23 +576,25 @@ class IngestionService
     // ──────────────────────────────────────────────
 
     /**
-     * Check if an article is a duplicate by URL (exact) and title similarity.
+     * Check if an article is a duplicate by URL or SHA-256 content hash.
      */
-    protected function isDuplicate(string $url, string $title): bool
+    protected function isDuplicate(string $url, string $title, string $body = ''): bool
     {
-        // Exact URL match
         if (RawArticle::where('url', $url)->exists()) {
             return true;
         }
 
-        // Content-hash match: normalize the title and check for near-duplicates
-        $normalizedTitle = $this->normalizeTitle($title);
-
-        if (RawArticle::whereRaw("LOWER(REPLACE(title, ' ', '')) = ?", [str_replace(' ', '', strtolower($normalizedTitle))])->exists()) {
+        $hash = RawArticle::makeContentHash($title, $body);
+        if (RawArticle::where('content_hash', $hash)->exists()) {
             return true;
         }
 
         return false;
+    }
+
+    protected function contentHash(string $title, string $body = ''): string
+    {
+        return RawArticle::makeContentHash($title, $body);
     }
 
     /**
